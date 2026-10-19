@@ -32,7 +32,7 @@ const S = {
   violLive: {}, violManual: [], dismissed: new Set(), tags: [], images: { license: null, cr: null, plates: [] }, scanAt: {},
   form: { location: '', date: new Date().toISOString().slice(0, 10), time: new Date().toTimeString().slice(0, 5), actions: {} },
   offenses: [], finals: {}, finalLines: [], progress: null, finalErr: null, videoURL: null, counters: { queued: 0, ignored: 0, lines: 0, dropped: 0 },
-  debug: store.get('debug', false), follow: store.get('follow', true), wakeMode: store.get('wakeMode', 'both'), join: store.get('join', true), vadOn: store.get('vadOn', 0.35),
+  debug: store.get('debug', false), follow: store.get('follow', true), wakeMode: store.get('wakeMode2', 'audio'), beepOn: store.get('beep', true), fastCmd: store.get('fastCmd', true), muteUntil: 0, beepCtx: null, join: store.get('join', true), vadOn: store.get('vadOn', 0.35),
   mic: store.get('mic', { echo: false, noise: false, agc: false }), dbg: [],
 };
 function newControl() { return 'CL-' + String(Math.floor(Math.random() * 1e7)).padStart(7, '0'); }
@@ -64,19 +64,20 @@ const send = o => { if (S.ws && S.wsReady) S.ws.send(JSON.stringify(o)); };
 /* ------------------------------------------------------------------------------------------------ events from the server */
 function onEvent(ev) {
   switch (ev.type) {
-    case 'hello': S.hello = ev; send({ type: 'settings', WAKE_MODE: S.wakeMode, JOIN_LINES: S.join, ON: S.vadOn }); renderTools(); break;
-    case 'vad': S.hearing = ev.speech; setPill(); break;
+    case 'hello': S.hello = ev; send({ type: 'settings', WAKE_MODE: S.wakeMode, JOIN_LINES: S.join, ON: S.vadOn, FAST_CMD: S.fastCmd }); renderTools(); break;
+    case 'vad': S.hearing = ev.speech; if (!ev.speech) flushWakeBeep(); setPill(); break;
     case 'wake': wake(ev); break;
+    case 'awake_end': beep('timeout'); if (!S.caseActive) dropCamera(); S.awakeUntil = 0; setPill(); tagline('Nothing heard after “Hey Jarvis”: back to idle. Say it again, or press Record.'); break;
     case 'segment': if (ev.action === 'ignored') S.counters.ignored++; else S.counters.queued++; if (S.toolsOpen) renderTools(); break;
     case 'line': onLine(ev); break;
     case 'command': onCommand(ev); break;
     case 'violations': onViolations(ev); break;
     case 'case': ev.state === 'started' ? onCaseStart(ev) : onCaseEnd(ev); break;
-    case 'final_start': if (ev.sid === S.sid) { S.progress = { done: 0, total: 0, source: ev.source }; S.finalLines = []; S.finalErr = null; renderIf(4); } break;
+    case 'final_start': if (ev.sid === S.sid) { S.progress = { done: 0, total: 0, source: ev.source }; S.finalLines = []; S.finalErr = null; renderIf(4); syncNext(); } break;
     case 'final_progress': if (ev.sid === S.sid) { S.progress = { done: ev.done, total: ev.total, source: ev.source }; renderIf(4); } break;
     case 'final_line': if (ev.sid === S.sid) { S.finalLines.push(ev.line); renderIf(4); } break;
-    case 'final_done': if (ev.sid === S.sid) { S.finals[ev.source] = ev.report; S.progress = null; renderIf(4); toast('Transcript ready (' + ev.report.lines.length + ' lines, ' + ev.report.seconds + ' s)'); } break;
-    case 'final_error': if (ev.sid === S.sid) { S.finalErr = ev.message; S.progress = null; renderIf(4); toast('After-stop pass failed: ' + esc(ev.message), 'err'); } break;
+    case 'final_done': if (ev.sid === S.sid) { S.finals[ev.source] = ev.report; S.progress = null; renderIf(4); syncNext(); toast('Transcript ready (' + ev.report.lines.length + ' lines, ' + ev.report.seconds + ' s)'); } break;
+    case 'final_error': if (ev.sid === S.sid) { S.finalErr = ev.message; S.progress = null; renderIf(4); syncNext(); toast('After-stop pass failed: ' + esc(ev.message), 'err'); } break;
     case 'error': toast('Server: ' + esc(ev.message), 'err'); break;
   }
 }
@@ -93,7 +94,31 @@ function onLine(ev) {
   if (S.toolsOpen) renderTools();
 }
 
+/* Short sounds so the enforcer knows what the system did. They are the only feedback: no beep after "Jarvis" = it was not heard.
+   While a beep plays the microphone stream is sent as silence, so the system never hears its own beep. */
+const BEEPS = { wake: [[880, 0.12]], case: [[660, 0.12], [990, 0.16]], timeout: [[220, 0.30]] };
+function beep(kind) {
+  if (!S.beepOn) return;
+  try {
+    S.beepCtx = S.beepCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (S.beepCtx.state === 'suspended') S.beepCtx.resume();
+    const ctx = S.beepCtx; let t = ctx.currentTime + 0.01, total = 0;
+    for (const [hz, dur] of BEEPS[kind]) {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = hz; o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.start(t); o.stop(t + dur + 0.02); t += dur + 0.04; total += dur + 0.04;
+    }
+    send({ type: 'beep', ms: Math.round(total * 1000) });      // the server ignores a short sound that starts right now (the beep leaking into the microphone)
+  } catch { /* no sound available: the screen still shows it */ }
+}
+
+/* The wake beep waits until you stop talking, so it never lands in the middle of "Hey Jarvis, mag-record ka na". */
+function flushWakeBeep() { clearTimeout(S.wakeBeepTimer); if (S.wakeBeepPending) { S.wakeBeepPending = false; beep('wake'); } }
 function wake(ev) {
+  ensureCamera();
+  S.wakeBeepPending = true; clearTimeout(S.wakeBeepTimer);
+  if (!S.hearing) flushWakeBeep(); else S.wakeBeepTimer = setTimeout(flushWakeBeep, 4000);
   S.awakeUntil = Date.now() + (ev.awake_seconds || 8) * 1000;
   setPill();
   clearTimeout(S.awakeTimer);
@@ -135,6 +160,8 @@ function onViolations(ev) {
 }
 
 function onCaseStart(ev) {
+  beep('case');
+  ensureCamera();
   S.caseActive = true; S.sid = ev.sid; S.caseStartWall = Date.now(); S.caseEnded = null; S.controlNo = newControl();
   S.violLive = {}; S.violManual = []; S.dismissed = new Set(); S.finals = {}; S.finalLines = []; S.progress = null; S.finalErr = null; S.tags = [];
   S.saved = false; S.upload = null;
@@ -239,17 +266,15 @@ function pushPCM(floats) {
 async function goLive() {
   if (S.live) return stopLive();
   if (S.replay) return;
+  if (transcribing()) { toast('The transcript is still being made. Wait until it is ready.', 'err'); return; }
   try { await connect(); } catch { toast('Cannot reach the app server', 'err'); return; }
   let stream;
   const audio = { channelCount: 1, echoCancellation: S.mic.echo, noiseSuppression: S.mic.noise, autoGainControl: S.mic.agc };
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio, video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } }); }
-  catch (e1) {
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio }); toast('No camera found: listening with the microphone only.'); }
-    catch (e2) { toast('The microphone is blocked or missing: ' + esc(e2.name || e2) + '. Allow it in the browser, or use “Replay a recording” in the test tools.', 'err', 8000); return; }
-  }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio }); }
+  catch (e2) { toast('The microphone is blocked or missing: ' + esc(e2.name || e2) + '. Allow it in the browser, or use “Replay a recording” in the test tools.', 'err', 8000); return; }
   S.stream = stream;
-  const cam = $('#cam');
-  if (stream.getVideoTracks().length) { cam.srcObject = stream; await cam.play().catch(() => { }); $('#noVideo').classList.add('hidden'); }
+  try { (await navigator.mediaDevices.getUserMedia({ video: true })).getTracks().forEach(t => t.stop()); }      // ask for the camera once now; it only runs during a case
+  catch { toast('No camera found: cases will be audio only.'); }
   S.ctx = new (window.AudioContext || window.webkitAudioContext)();
   await S.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })));
   const src = S.ctx.createMediaStreamSource(stream);
@@ -263,14 +288,14 @@ async function goLive() {
     pushPCM(resample(x, S.ctx.sampleRate));
   };
   S.live = true;
-  startRecorder();
   const b = $('#btnLive'); b.textContent = 'STOP'; b.classList.add('live');
   setPill();
-  tagline('Listening. Say <b>“Hey Jarvis, mag-record ka na”</b> to open a case.');
+  tagline('Idle: listening for <b>“Hey Jarvis”</b>. The camera starts with the case.');
 }
 
 function stopLive() {
   S.live = false;
+  send({ type: 'listening', on: false });
   if (S.caseActive) send({ type: 'command', name: 'end_recording' });
   clearInterval(S.rotateTimer);
   if (S.recorder && S.recorder.state !== 'inactive' && !S.caseActive) { S.recorder.onstop = null; S.recorder.stop(); }
@@ -297,10 +322,30 @@ function startRecorder() {
   S.recorder.ondataavailable = e => { if (e.data && e.data.size) S.chunks.push(e.data); };
   S.recorder.onstart = () => send({ type: 'marker', vid });
   S.recorder.start(1000);
-  clearInterval(S.rotateTimer);                    // no case open for 2 minutes: start a fresh file so the idle video never piles up
-  S.rotateTimer = setInterval(() => {
-    if (!S.caseActive && S.live && S.recorder && S.recorder.state === 'recording') { S.recorder.onstop = null; S.recorder.stop(); startRecorder(); }
-  }, 120000);
+}
+
+/* The camera runs only from "Hey Jarvis" until the case is closed. Idle = microphone + wake word only. */
+async function ensureCamera() {
+  if (!S.live || !S.stream || S.camBusy || typeof MediaRecorder === 'undefined') return;
+  if (S.recorder && S.recorder.state !== 'inactive') return;
+  S.camBusy = true;
+  try {
+    const vs = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } });
+    const vt = vs.getVideoTracks()[0];
+    if (!S.live || !S.stream) { vt.stop(); return; }
+    S.stream.addTrack(vt);
+    const cam = $('#cam'); cam.srcObject = S.stream; await cam.play().catch(() => { }); $('#noVideo').classList.add('hidden');
+  } catch { toast('No camera found: this case is audio only.'); }
+  finally { S.camBusy = false; }
+  if (S.live && S.stream && !(S.recorder && S.recorder.state !== 'inactive')) startRecorder();
+}
+function stopCamera() {
+  if (S.stream) S.stream.getVideoTracks().forEach(t => { t.stop(); S.stream.removeTrack(t); });
+  $('#cam').srcObject = null; $('#noVideo').classList.remove('hidden');
+}
+function dropCamera() {                            // "Hey Jarvis" but no case: throw the short recording away
+  if (S.recorder && S.recorder.state !== 'inactive') { S.recorder.onstop = null; S.recorder.stop(); }
+  S.recorder = null; stopCamera();
 }
 function finishVideo(sid) {
   const rec = S.recorder, vid = S.vid, mime = rec.mimeType || 'video/webm';
@@ -311,8 +356,9 @@ function finishVideo(sid) {
     const fd = new FormData(); fd.append('video', blob, 'video.webm'); fd.append('vid', vid);
     S.upload = fetch(`/api/session/${sid}/video`, { method: 'POST', body: fd }).catch(e => toast('Could not send the video: ' + esc(e), 'err'));
     await S.upload;
-    if (S.live) startRecorder();
-    else if (S.stream) { S.stream.getTracks().forEach(t => t.stop()); S.stream = null; $('#cam').srcObject = null; $('#noVideo').classList.remove('hidden'); }
+    S.recorder = null;
+    stopCamera();                                   // the case is closed: the camera is off, and the listener is back to idle (microphone + "Hey Jarvis" only)
+    if (S.live) tagline('Idle: listening for <b>“Hey Jarvis”</b>. The transcript is being made after you save the ticket.');
   };
   rec.stop();
 }
@@ -343,6 +389,16 @@ async function replayFile(file) {
 }
 
 /* ------------------------------------------------------------------------------------------------ steps */
+/* The transcript is being made (or about to be): nothing may cancel it or start a new ticket until it is done. */
+function transcribing() { return !!S.progress || !!(S.saved && S.sid && S.caseEnded && !S.finals.video && !S.finals.stream && !S.finalErr); }
+function syncNext() {
+  const busy = transcribing(), b = $('#btnNext');
+  b.textContent = S.step < 4 ? 'NEXT' : (S.caseEnded && !S.saved ? 'SAVE TICKET' : (busy ? 'TRANSCRIBING…' : 'NEW TICKET'));
+  b.disabled = S.step === 4 && busy;
+  $('#btnCancel').disabled = busy;
+  $('#btnLive').disabled = busy && !S.live;
+}
+
 function gotoStep(n) {
   S.step = Math.max(1, Math.min(4, n));
   document.querySelectorAll('.stepper li').forEach(li => {
@@ -352,7 +408,7 @@ function gotoStep(n) {
   });
   $('#stepTitle').textContent = STEPS[S.step - 1].title;
   $('#stepSub').textContent = STEPS[S.step - 1].sub;
-  $('#btnNext').textContent = S.step < 4 ? 'NEXT' : (S.caseEnded && !S.saved ? 'SAVE TICKET' : 'NEW TICKET');
+  syncNext();
   renderStep();
 }
 
@@ -479,11 +535,13 @@ function renderTools() {
     <input type="file" id="fileReplay" accept="audio/*,.wav,.m4a,.mp3">
     <p class="note">It plays into the app in real time, exactly like the microphone. Use your own recordings, with or without road noise.</p>
     <h3>What the app hears</h3>
-    <label class="tg">Wake word<select id="tWake"><option value="both">audio + “Jarvis” in the text</option><option value="audio">audio only (lightest)</option><option value="off">off: any line can be a command</option></select></label>
+    <label class="tg">Wake word<select id="tWake"><option value="audio">Wake word only: Whisper stays idle until “Hey Jarvis” (lightest)</option><option value="both">audio + “Jarvis” in the text (Whisper reads idle talk)</option><option value="off">off: any line can be a command</option></select></label>
+    <label class="tg">Faster commands: shorter Whisper window right after “Hey Jarvis” (about 3x faster, slightly less accurate)<input type="checkbox" id="tFast"></label>
     <label class="tg">Read two neighbouring lines together<input type="checkbox" id="tJoin"></label>
     <label class="tg">Speech sensitivity <span id="vOnLbl">${S.vadOn}</span><input type="range" id="tOn" min="0.2" max="0.6" step="0.05" value="${S.vadOn}"></label>
     <h3>Screen</h3>
     <label class="tg">Jump to the step a command belongs to<input type="checkbox" id="tFollow"></label>
+    <label class="tg">Beep sounds (wake heard, case open, nothing heard)<input type="checkbox" id="tBeep"></label>
     <label class="tg">Show what was heard (text) below<input type="checkbox" id="tDebug"></label>
     <h3>Microphone (takes effect at the next Go live)</h3>
     <label class="tg">Echo cancellation<input type="checkbox" id="mEcho"></label>
@@ -498,7 +556,7 @@ function renderTools() {
     ${rows ? `<table class="t" style="margin-top:8px"><tr><th>Tag</th><th>total</th><th>wait</th><th>queue</th><th>Whisper</th></tr>${rows}</table>` : ''}
     <h3>Past cases</h3><div id="pastBox">loading…</div>
     ${S.debug ? `<h3>Heard (debug)</h3><div class="debuglog">${esc(S.dbg.join('\n')) || 'nothing yet'}</div>` : ''}`;
-  $('#tWake').value = S.wakeMode; $('#tJoin').checked = S.join; $('#tFollow').checked = S.follow; $('#tDebug').checked = S.debug;
+  $('#tWake').value = S.wakeMode; $('#tJoin').checked = S.join; $('#tFollow').checked = S.follow; $('#tBeep').checked = S.beepOn; $('#tFast').checked = S.fastCmd; $('#tDebug').checked = S.debug;
   $('#mEcho').checked = S.mic.echo; $('#mNoise').checked = S.mic.noise; $('#mAgc').checked = S.mic.agc;
   loadPast();
 }
@@ -563,8 +621,10 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.dataset && t.dataset.act) S.form.actions[t.dataset.act] = t.checked;
-  if (t.id === 'tWake') { S.wakeMode = t.value; store.set('wakeMode', t.value); send({ type: 'settings', WAKE_MODE: t.value }); }
+  if (t.id === 'tWake') { S.wakeMode = t.value; store.set('wakeMode2', t.value); send({ type: 'settings', WAKE_MODE: t.value }); }
   if (t.id === 'tJoin') { S.join = t.checked; store.set('join', t.checked); send({ type: 'settings', JOIN_LINES: t.checked }); }
+  if (t.id === 'tFast') { S.fastCmd = t.checked; store.set('fastCmd', t.checked); send({ type: 'settings', FAST_CMD: S.fastCmd }); }
+  if (t.id === 'tBeep') { S.beepOn = t.checked; store.set('beep', t.checked); if (t.checked) beep('wake'); }
   if (t.id === 'tFollow') { S.follow = t.checked; store.set('follow', t.checked); }
   if (t.id === 'tDebug') { S.debug = t.checked; store.set('debug', t.checked); renderTools(); }
   if (t.id === 'mEcho' || t.id === 'mNoise' || t.id === 'mAgc') { S.mic = { echo: $('#mEcho').checked, noise: $('#mNoise').checked, agc: $('#mAgc').checked }; store.set('mic', S.mic); }
@@ -589,6 +649,7 @@ $('#btnCancel').addEventListener('click', () => {            // two taps instead
 $('#chooseModal').addEventListener('click', e => { if (e.target.id === 'chooseModal') e.target.classList.add('hidden'); });
 
 function newTicket(cancelled) {
+  if (transcribing()) { toast('The transcript is still being made. Wait until it is ready.', 'err'); return; }
   if (S.caseActive) send({ type: 'reset' });
   S.caseActive = false; clearInterval(S.recTimer); $('#pillRec').classList.add('hidden');
   S.sid = null; S.caseEnded = null; S.saved = false; S.upload = null; S.controlNo = newControl(); $('#ctrlNo').textContent = S.controlNo;

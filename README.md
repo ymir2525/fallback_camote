@@ -23,7 +23,8 @@ Phone on the same Wi-Fi: browsers only allow the microphone on `https` or `local
 ## What is live and what is after the stop
 | | When | How |
 |---|---|---|
-| Wake word | live | audio model (openWakeWord "hey_jarvis", threshold 0.3) **or** the word "Jarvis" found in the text of an idle line (loose sound match) |
+| Wake word | live | **default: audio model only** (openWakeWord "hey_jarvis", threshold 0.3). Whisper stays loaded but gets NO audio while idle; "Hey Jarvis" opens an 8 s window (3 s look-back so a one-breath "Hey Jarvis, mag-record" is still read), and 8 s of silence goes back to idle. Optional mode "audio + Jarvis in the text" makes Whisper read idle talk too |
+| Beeps | live | short beep = wake heard, two-tone = case open, low tone = nothing heard (back to idle). No beep after "Jarvis" = not heard. The microphone stream is sent as silence while a beep plays |
 | 5 commands: Record, Scan license, Scan CR, Capture, End case | live | CAMOTE command matcher on the enforcer's line; buttons on the screen do the same (source "button") |
 | Violation tags | live, while a case is open | CAMOTE phonetic fix + violation matcher; denial rule; two neighbouring lines are also read together |
 | Live transcript on screen | **removed** | only commands, tags and timing are shown (turn on "Show what was heard" in the tools to see text while testing) |
@@ -51,7 +52,13 @@ Play the same recording through both and compare: (1) did the same commands and 
 (wait + queue + Whisper), (3) how the screen behaves when a line is long or noisy. **Export report (JSON)** in the Preview saves all numbers.
 Settings to try (gear): wake mode (`audio + text`, `audio only`, `off`), reading two lines together, speech sensitivity (0.25 for far voices).
 
+## Test like a Pi 5 (cores)
+`$env:FALLBACK_CORES = 4` before `run.ps1` (or any test) pins the app to 4 cores and 4 Whisper threads. It is a guide only: PC cores are faster and a different chip type. `limits.py` also reports peak memory.
+
 ## Tests
+```
+<python> tests\e2e_wake.py         # wake-only mode: catch rate one-breath / with pause, clean and noise, idle cost, false wakes (about 15 min, real time)
+```
 ```
 <python> tests\test_cutter.py      # pure road noise = 0 segments; streaming = whole file; lines covered
 <python> tests\e2e_live.py         # real clips + road noise in real time: wake, 4 commands, violations, after-stop pass   (E2E_NOISE_GAIN=0.01 for a quiet street)
@@ -66,3 +73,15 @@ Settings to try (gear): wake mode (`audio + text`, `audio only`, `off`), reading
 * "Scan license / Scan CR / Capture" save a camera frame only. Reading the license text (OCR) is not part of this fallback.
 * Speaker labels: not yet.
 
+
+
+## Phone app side (added 2026-10-20)
+The capture page (this browser page, later the Pi) sends audio on `/ws`. A phone app connects to **`/app`** and only listens and presses buttons:
+* `GET /status` answers `{"state": "connected", ...}` like the Pi (the TraffiCam app polls this).
+* `/app` sends: `hello` (with the current state), `listening`, `wake`, `awake_end`, `command` (start_recording, scan_license, scan_cr, capture, end_recording), `violations`, `case` (started / ended), `final_start`, `final_progress`, `final_done`, `final_error`. The heard text is never sent.
+* `/app` accepts: `{"type":"command","name":"start_recording"}` (the phone's buttons), `{"type":"save_ticket","sid":..,"ticket":{..}}`, `{"type":"ping"}`.
+* For a phone on the same Wi-Fi start with `$env:FALLBACK_HOST = "0.0.0.0"` (Windows asks once to allow the private network), and use the PC's Wi-Fi IP.
+* Test without a phone: `<python> tests\e2e_app.py` (server running).
+
+## Case done
+When the case closes the camera is switched off and the system is idle again (microphone + "Hey Jarvis" only). The camera starts again at the next "Hey Jarvis" (or Start button). While a transcript is being made, **New ticket**, **Cancel ticket**, **Go live** and a spoken/pressed start are refused.

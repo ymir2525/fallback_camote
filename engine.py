@@ -48,8 +48,14 @@ CFG = {
     "AWAKE_CAP": float(_env("FALLBACK_AWAKE_CAP", "6")),
     # wake word. "both" = audio model OR the word "Jarvis" heard in the text (measured: the audio model alone caught only 1 of 8 of the owner's "Jarvis" clips);
     # "audio" = audio model only (idle speech is never sent to Whisper: lightest); "off" = every idle line may carry a command
-    "WAKE_MODE": _env("FALLBACK_WAKE_MODE", "both"),
+    "WAKE_MODE": _env("FALLBACK_WAKE_MODE", "audio"),
     "WAKE_THRESHOLD": float(_env("FALLBACK_WAKE_THRESHOLD", "0.3")),      # 0.3 on the owner's clips: 0 false wakes in 252 other clips and 18.5 min of road noise
+    "LOOKBACK": float(_env("FALLBACK_LOOKBACK", "3")),          # a line that ended up to this many seconds before the wake word fired is still read
+    "CORES": int(_env("FALLBACK_CORES", "0")),                  # test on the PC like a Raspberry Pi 5: 4 = use only 4 cores (0 = no limit)
+    # Command lines (right after "Hey Jarvis") use a 10 s Whisper window instead of 30 s: ~0.55 s instead of ~1.85 s per line on 4 cores.
+    # Measured on 90 command clips: 70 right vs 74 with the full window. Violation lines and the after-stop transcript always use the full window.
+    "FAST_CMD": _env("FALLBACK_FAST_CMD", "1") == "1",
+    "CTX_STEP": float(_env("FALLBACK_CTX_STEP", "5.0")),         # window = line length + 0.5 s rounded up to this step, never under 2 steps (10 s)
     "JOIN_LINES": _env("FALLBACK_JOIN_LINES", "1") == "1",      # also read two neighbouring lines together (a violation split by a pause)
     "MERGE_GAP": 1.5,                                            # short lines closer than this (seconds) go to Whisper as ONE call
     "MERGE_MAX": 12.0,
@@ -106,6 +112,19 @@ def wake_in_text(text, r_wake_text=False):
     return False
 
 
+# "Tapos na" alone is what drivers and anyone say all the time (and what Whisper invents from a noise fragment): it must not close a case.
+# Ending needs a second keyword: record / recording, case / kaso, or Jarvis ("Kaso tapos na", "Tapos na ang record", "Jarvis, tapos na", "End recording").
+_END_CONTEXT = re.compile(r"\b(?:record\w*|rekord\w*|case|kaso|jarvis|ticket)\b")
+
+
+def gate_end(r):
+    """Remove end_recording when the line has no second keyword. Returns the (possibly changed) analysis."""
+    if "end_recording" in r["commands"] and not (r.get("wake_text") or _END_CONTEXT.search((r["text"] + " " + r["raw"]).lower())):
+        r = {**r, "commands": [c for c in r["commands"] if c != "end_recording"],
+             "hints": list(r["hints"]) + ["to end: also say case / record / Jarvis"]}
+    return r
+
+
 _DENY_NEXT = re.compile(r"\b(?:hindi totoo|mali yun|mali yan)\b")
 
 
@@ -141,16 +160,36 @@ def session_violations(turns, join=True, max_gap=2.5):
 
 
 # ---------------------------------------------------------------------------------------------------------- models
+# Whisper always looks at a 30 s window, so a 2 s command costs as much as a 30 s one (on 4 cores: ~1.4 s of the ~2.3 s is that fixed encoder).
+# The encoder also runs on a shorter window (measured 10 s: 0.32 s, 5 s: ~0.17 s). `short_ctx` pads each line only up to the next 2.5 s step instead of 30 s.
+import faster_whisper.transcribe as _FT
+
+_ORIG_PAD = _FT.pad_or_trim
+_CTX = {"frames": None}
+
+
+def _pad_ctx(array, length=3000, *, axis=-1):
+    return _ORIG_PAD(array, _CTX["frames"] or length, axis=axis)
+
+
+_FT.pad_or_trim = _pad_ctx
+
+
 class Whisper:
     def __init__(self, model_dir, threads):
         from faster_whisper import WhisperModel
         self.model = WhisperModel(str(model_dir), device="cpu", compute_type="int8", cpu_threads=threads)
         self.lock = threading.Lock()
 
-    def transcribe(self, pcm, beam=1):
+    def transcribe(self, pcm, beam=1, short_ctx=False):
         x = np.asarray(pcm).astype(np.float32) / 32768.0
         cap = min(int(math.ceil(len(x) / SR * 12)) + 10, 200)
+        frames = None
+        if short_ctx:
+            step = int(CFG["CTX_STEP"] * 100)
+            frames = int(min(3000, max(step * 2, math.ceil((len(x) / SR + 0.5) * 100 / step) * step)))
         with self.lock:
+            _CTX["frames"] = frames
             segs, _ = self.model.transcribe(x, language="tl", beam_size=beam, vad_filter=False, condition_on_previous_text=False,
                                             initial_prompt=PROMPT, temperature=0.0, max_new_tokens=cap)
             text = " ".join(s.text.strip() for s in segs if s.no_speech_prob < 0.6)
@@ -177,6 +216,10 @@ class WakeDetector:
 
 class Engine:
     def __init__(self):
+        if CFG["CORES"] > 0:
+            import limits
+            CFG["THREADS"] = min(CFG["THREADS"], CFG["CORES"])
+            print("[fallback]", limits.limit_cores(CFG["CORES"]), flush=True)
         d = CFG["WHISPER_DIR"]
         if not os.path.isdir(d):
             raise SystemExit(f"Whisper model folder not found: {d}\nSet FALLBACK_WHISPER_DIR to a CTranslate2 model folder (run13-ct2-int8).")
@@ -223,6 +266,9 @@ class Live:
         self.ignored = 0
         self._in_speech = False
         self._short_mode = None
+        self._awake_open = False                  # a wake window is open and nobody has used it yet
+        self.recent = []                          # idle lines that were NOT sent to Whisper, kept a few seconds in case the wake word fires just after
+        self.stats = {"whisper_calls": 0, "whisper_s": 0.0, "idle_skipped": 0, "wakes": 0, "awake_timeouts": 0, "requeued": 0}
         self.cv = threading.Condition()
         self.jobs, self.busy, self.stopped, self.seq = [], False, False, 0
         threading.Thread(target=self._worker, daemon=True).start()
@@ -257,6 +303,8 @@ class Live:
             self.cfg["WAKE_MODE"] = kw["WAKE_MODE"]
             if self.wake is None and kw["WAKE_MODE"] != "off" and self.e.wake_available:
                 self.wake = WakeDetector(self.cfg["WAKE_THRESHOLD"])
+        if "FAST_CMD" in kw:
+            self.cfg["FAST_CMD"] = bool(kw["FAST_CMD"])
         if "ON" in kw:
             self.cfg["ON"] = self.cutter.on = float(kw["ON"])
 
@@ -269,6 +317,10 @@ class Live:
         self.samples += len(pcm)
         self._wake(pcm)
         self._mode()
+        if self._awake_open and not self.recording and self.clock > self.awake_until and not self.pending() and not self.cutter.in_seg:
+            self._awake_open = False                  # the window ran out and nothing was said: back to idle (Whisper off)
+            self.stats["awake_timeouts"] += 1
+            self._emit({"type": "awake_end"})
         for seg in self.cutter.feed(pcm):
             self._on_segment(seg)
         if self.cutter.in_seg != self._in_speech:
@@ -285,7 +337,18 @@ class Live:
     def _set_wake(self, source):
         self.wake_at = self.clock
         self.awake_until = self.clock + self.cfg["AWAKE_SECONDS"]
+        self._awake_open = True
+        self.stats["wakes"] += 1
         self._emit({"type": "wake", "source": source, "awake_seconds": self.cfg["AWAKE_SECONDS"]})
+        # the detector fires a moment after "Jarvis": the line that carried it may already have ended and been skipped, so read it now
+        keep = []
+        for seg in self.recent:
+            if not self.recording and seg["t1"] >= self.clock - self.cfg["LOOKBACK"]:
+                self.stats["requeued"] += 1
+                self._enqueue(seg, 0)
+            else:
+                keep.append(seg)
+        self.recent = keep
 
     def _mode(self):
         """Right after the wake word the next line is a short command: end it sooner. During a case lines are conversation: normal limits."""
@@ -296,7 +359,15 @@ class Live:
             self.cutter.set_limits(end_silence=c["AWAKE_END_SILENCE"] if short else c["END_SILENCE"], cap=c["AWAKE_CAP"] if short else c["CAP"])
 
     # ------------------------------------------------------------------ a finished line -> queue
+    def note_beep(self, ms):
+        """The page played a beep now. A very short sound that starts right then is the speaker leaking into the microphone: it is dropped, the audio itself is never blanked."""
+        self.beep_win = (self.clock, self.clock + ms / 1000.0 + 0.3)
+
     def _on_segment(self, seg):
+        bw = getattr(self, "beep_win", None)
+        if bw and (seg["speech_t1"] - seg["speech_t0"]) < 1.0 and bw[0] - 0.15 <= seg["speech_t0"] <= bw[1]:
+            self.cb({"type": "segment", "action": "beep", "dur": round(len(seg["pcm"]) / SR, 2), "clock": round(self.clock, 2)})
+            return
         awake = self.wake_at is not None and seg["t1"] >= self.wake_at - 0.5 and seg["t0"] <= self.awake_until
         mode = self.cfg["WAKE_MODE"]
         if awake or (not self.recording and mode == "off"):
@@ -307,9 +378,14 @@ class Live:
             prio = 2                                        # idle speech: heard last; only counts if the text itself contains the wake phrase
         else:
             self.ignored += 1
+            self.stats["idle_skipped"] += 1
+            self.recent = [r for r in self.recent if r["t1"] >= self.clock - self.cfg["LOOKBACK"]] + [seg]
             self.cb({"type": "segment", "action": "ignored", "dur": round(len(seg["pcm"]) / SR, 2), "ignored_total": self.ignored,
                      "clock": round(self.clock, 2)})
             return
+        self._enqueue(seg, prio)
+
+    def _enqueue(self, seg, prio):
         self.seq += 1
         seg.update(prio=prio, enq=time.time(), seq=self.seq, merged=1)
         with self.cv:
@@ -362,8 +438,10 @@ class Live:
     def _handle(self, job):
         queue_s = time.time() - job["enq"]
         t0 = time.time()
-        text = self.e.whisper.transcribe(job["pcm"], beam=self.cfg["LIVE_BEAM"])
+        text = self.e.whisper.transcribe(job["pcm"], beam=self.cfg["LIVE_BEAM"], short_ctx=self.cfg["FAST_CMD"] and job["prio"] == 0)
         whisper_s = time.time() - t0
+        self.stats["whisper_calls"] += 1
+        self.stats["whisper_s"] = round(self.stats["whisper_s"] + whisper_s, 2)
         base = {"audio_s": round(len(job["pcm"]) / SR, 2), "wait_s": round(job["wait_s"], 2), "queue_s": round(queue_s, 2),
                 "whisper_s": round(whisper_s, 2), "merged": job["merged"], "late": queue_s > self.cfg["MAX_WAIT"], "prio": job["prio"],
                 "reason": job["reason"]}
@@ -371,7 +449,7 @@ class Live:
             self._emit({"type": "line", "text": "", "dropped": "loop" if text else "empty", "timing": {**base, "total_s": round(base["wait_s"] + queue_s + whisper_s, 2)}})
             return
         t1 = time.time()
-        r = analyze(text)
+        r = gate_end(analyze(text))
         match_s = time.time() - t1
         timing = {**base, "match_s": round(match_s, 4), "total_s": round(job["wait_s"] + queue_s + whisper_s + match_s, 2)}
         has_wake = wake_in_text(r["raw"], r["wake_text"])
@@ -402,6 +480,10 @@ class Live:
             if self.recording:
                 self._emit({**ev, "note": "already recording"})
                 return
+            gate = getattr(self, "start_gate", None)
+            if gate is not None and not gate():                  # the last ticket's transcript is still being made: no new ticket yet
+                self._emit({**ev, "note": "wait, the last transcript is still being made"})
+                return
             self._emit(ev)
             self.recording = True
             self.history, self.live_labels, self.case_events = [], [], []
@@ -418,10 +500,11 @@ class Live:
             self.case["end"] = job["t1"] if job else clock
             self._save_case()
             self._emit({"type": "case", "state": "ended", "sid": self.case["sid"], "start": round(self.case["start"], 2), "end": round(self.case["end"], 2),
-                        "violations": self.live_labels, "violation_names": full_names(self.live_labels), "lines": len(self.history)})
+                        "violations": self.live_labels, "violation_names": full_names(self.live_labels), "lines": len(self.history), "stats": dict(self.stats)})
         else:
             self._emit(ev)
         self.awake_until = -1.0                             # one wake word = one command line
+        self._awake_open = False
         self._short_mode = None
 
     def mark(self, vid):
@@ -536,7 +619,7 @@ def run_final(engine, sid, source, progress=None, line_cb=None, beam=None):
         text = engine.whisper.transcribe(s["pcm"], beam=beam)
         dt = time.time() - t0
         if text and not looks_like_loop(text):
-            r = analyze(text)
+            r = gate_end(analyze(text))
             in_case = cs is None or (s["t1"] >= cs - 1.0 and s["t0"] <= ce + 1.0)
             line = {"t0": round(s["t0"], 2), "t1": round(s["t1"], 2), "speaker": speaker_of(s["pcm"]), "raw": r["raw"], "text": r["text"],
                     "commands": r["commands"], "violations": r["violations"], "hints": r["hints"], "in_case": in_case, "seconds": round(dt, 2)}

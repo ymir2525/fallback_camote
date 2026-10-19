@@ -24,15 +24,59 @@ import engine as E  # noqa: E402
 
 ENGINE = None
 LOOP = None
-QUEUES = set()            # one asyncio.Queue per connected page
+QUEUES = set()            # one asyncio.Queue per connected capture page (microphone + camera)
+APP_QUEUES = set()        # one per connected phone app (/app): it only listens and sends buttons, never audio
+STATE = {"listening": False, "case": None, "violations": [], "awake": False, "transcribing": []}      # what a phone app needs when it connects late
+ACTIVE = {"live": None}   # the capture connection that is feeding audio now: phone buttons act on it
 
 
 def broadcast(ev):
-    """Thread-safe: after-stop progress goes to every open page."""
+    """Thread-safe: after-stop progress goes to every open page and every phone app."""
     if LOOP is None:
         return
-    for q in list(QUEUES):
+    _track(ev)
+    for q in list(QUEUES) + list(APP_QUEUES):
         LOOP.call_soon_threadsafe(q.put_nowait, ev)
+
+
+APP_EVENTS = {"wake", "awake_end", "command", "violations", "case", "final_start", "final_progress", "final_done", "final_error", "listening"}
+
+
+def _track(ev):
+    """Keep STATE up to date from the events that pass by."""
+    t = ev.get("type")
+    if t == "wake":
+        STATE["awake"] = True
+    elif t in ("awake_end", "command"):
+        STATE["awake"] = False
+    elif t == "violations":
+        STATE["violations"] = list(ev.get("labels", []))
+    elif t == "case":
+        if ev.get("state") == "started":
+            STATE["case"] = {"sid": ev.get("sid"), "start": ev.get("start")}
+            STATE["violations"] = []
+        else:
+            STATE["case"] = None
+            STATE["awake"] = False
+    elif t == "final_start":
+        if ev.get("sid") not in STATE["transcribing"]:
+            STATE["transcribing"].append(ev.get("sid"))
+    elif t in ("final_done", "final_error"):
+        STATE["transcribing"] = [s for s in STATE["transcribing"] if s != ev.get("sid")]
+    elif t == "listening":
+        STATE["listening"] = bool(ev.get("on"))
+
+
+def live_event(q):
+    """Callback for one capture connection: its page gets everything; phone apps get the events they need (never the heard text)."""
+    def cb(ev):
+        _track(ev)
+        LOOP.call_soon_threadsafe(q.put_nowait, ev)
+        if ev.get("type") in APP_EVENTS:
+            out = {k: v for k, v in ev.items() if k != "text"}       # a command event carries the heard line: the app never gets it
+            for aq in list(APP_QUEUES):
+                LOOP.call_soon_threadsafe(aq.put_nowait, out)
+    return cb
 
 
 @asynccontextmanager
@@ -63,6 +107,13 @@ app.mount("/samples", StaticFiles(directory=str(HERE / "samples")), name="sample
 @app.get("/", response_class=HTMLResponse)
 def index():
     return (HERE / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/status")
+def status():
+    """What the phone app polls (same shape as the Pi: {"state": "connected"}) plus what the backend is doing."""
+    return {"state": "connected" if ENGINE is not None else "starting", "name": "CAMote-0001", "backend": "fallback_camote",
+            "listening": STATE["listening"], "case": STATE["case"], "transcribing": STATE["transcribing"], "ws": "/app"}
 
 
 @app.get("/api/health")
@@ -107,9 +158,10 @@ def session_video(sid: str):
 
 
 def _start_final(sid, source):
+    broadcast({"type": "final_start", "sid": sid, "source": source})       # announced at once: nothing can start a new ticket while this runs
+
     def go():
         try:
-            broadcast({"type": "final_start", "sid": sid, "source": source})
             rep = E.run_final(ENGINE, sid, source,
                               progress=lambda i, n: broadcast({"type": "final_progress", "sid": sid, "source": source, "done": i, "total": n}))
             # no line-by-line output: the whole transcript is sent once, when everything is transcribed
@@ -141,15 +193,19 @@ async def upload_video(sid: str, video: UploadFile = File(...), vid: str = Form(
 @app.post("/api/session/{sid}/save")
 async def save_ticket(sid: str, req: Request):
     """Ticket saved: keep the ticket form next to the case, then make the after-stop transcript (video if there is one)."""
-    p = _case(sid)
     try:
         ticket = await req.json()
     except Exception:
         ticket = {}
+    return {"ok": True, "source": _save(sid, ticket)}
+
+
+def _save(sid, ticket):
+    p = _case(sid)
     (p.parent / "ticket.json").write_text(json.dumps(ticket, indent=1, ensure_ascii=False), encoding="utf-8")
     source = "video" if E.find_video(p.parent) is not None else "stream"
     _start_final(sid, source)
-    return {"ok": True, "source": source}
+    return source
 
 
 @app.post("/api/session/{sid}/final")
@@ -166,7 +222,8 @@ async def ws(sock: WebSocket):
     await sock.accept()
     q = asyncio.Queue()
     QUEUES.add(q)
-    live = E.Live(ENGINE, lambda ev: LOOP.call_soon_threadsafe(q.put_nowait, ev))
+    live = E.Live(ENGINE, live_event(q))
+    live.start_gate = lambda: not STATE["transcribing"]
 
     async def sender():
         while True:
@@ -183,12 +240,21 @@ async def ws(sock: WebSocket):
             if m.get("type") == "websocket.disconnect":
                 break
             if m.get("bytes") is not None:
+                if ACTIVE["live"] is not live:
+                    ACTIVE["live"] = live
+                    broadcast({"type": "listening", "on": True})
                 live.feed(m["bytes"])
             elif m.get("text"):
                 j = json.loads(m["text"])
                 t = j.get("type")
                 if t == "marker":
                     live.mark(str(j.get("vid", "")))
+                elif t == "beep":
+                    live.note_beep(float(j.get("ms", 400)))
+                elif t == "listening" and not j.get("on", True):
+                    if ACTIVE["live"] is live:                 # the page stopped listening (Stop pressed, or the case closed)
+                        ACTIVE["live"] = None
+                        broadcast({"type": "listening", "on": False})
                 elif t == "command":
                     live.do_command(str(j.get("name", "")), "app")
                 elif t == "settings":
@@ -202,7 +268,53 @@ async def ws(sock: WebSocket):
     finally:
         task.cancel()
         QUEUES.discard(q)
+        if ACTIVE["live"] is live:
+            ACTIVE["live"] = None
+            broadcast({"type": "listening", "on": False})
         live.close()
+
+
+@app.websocket("/app")
+async def app_ws(sock: WebSocket):
+    """The phone app: it listens (wake, commands, violations, case, transcription progress) and can press buttons. No audio goes through here."""
+    await sock.accept()
+    q = asyncio.Queue()
+    APP_QUEUES.add(q)
+
+    async def sender():
+        while True:
+            await sock.send_json(await q.get())
+
+    task = asyncio.create_task(sender())
+    try:
+        await sock.send_json({"type": "hello", "role": "app", "name": "CAMote-0001", "commands": E.COMMANDS, "state": STATE})
+        while True:
+            m = await sock.receive()
+            if m.get("type") == "websocket.disconnect":
+                break
+            if not m.get("text"):
+                continue
+            j = json.loads(m["text"])
+            t = j.get("type")
+            if t == "ping":
+                await sock.send_json({"type": "pong", "state": STATE})
+            elif t == "command":                       # the phone's Start / Stop / Scan buttons
+                live = ACTIVE["live"]
+                if live is None:
+                    await sock.send_json({"type": "error", "message": "The microphone side is not listening yet."})
+                else:
+                    live.do_command(str(j.get("name", "")), "app")
+            elif t == "save_ticket":
+                try:
+                    src = _save(str(j.get("sid", "")), j.get("ticket") or {})
+                    await sock.send_json({"type": "saved", "sid": j.get("sid"), "source": src})
+                except HTTPException as ex:
+                    await sock.send_json({"type": "error", "message": str(ex.detail)})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        task.cancel()
+        APP_QUEUES.discard(q)
 
 
 if __name__ == "__main__":
