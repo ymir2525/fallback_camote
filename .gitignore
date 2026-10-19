@@ -1,0 +1,12 @@
+﻿# private recordings and runtime output: never in git
+sessions/*
+!sessions/.gitkeep
+samples/*.wav
+*.webm
+*.wav
+*.mp4
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.log

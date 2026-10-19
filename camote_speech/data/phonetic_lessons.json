@@ -1,0 +1,148 @@
+{
+ "about": "Mishearings collected after each test: what Whisper wrote -> what was really said. seed_phonetic_db.py merges this into whisper_phonetic_db.json. Add new lessons after every test; only clear, low-risk ones.",
+ "targets": [
+  "stalled"
+ ],
+ "typos": {
+  "hastall": "stalled",
+  "paskan ng cr": "pa-scan ng CR",
+  "shot ng helmet": "suot ng helmet",
+  "holing": "huling",
+  "dalamong": "dala mong",
+  "expart": "expired",
+  "pasunang": "paso na",
+  "sangpung": "sampung",
+  "vente": "bente",
+  "patensya": "pasensya",
+  "mero": "meron",
+  "sosunod": "susunod",
+  "inhat": "ingat",
+  "naligao": "naligaw",
+  "nagmamagali": "nagmamadali",
+  "bagumbalit": "bagong palit",
+  "ula kang": "wala kang",
+  "hidi": "hindi",
+  "prankisa": "prangkisa",
+  "kohanan": "kuhanan",
+  "sa glit": "saglit",
+  "dag dag": "dagdag",
+  "dumahan": "dumaan",
+  "pasayero": "pasahero",
+  "mai kli": "maikli",
+  "icapture": "i capture",
+  "iscan": "i scan",
+  "baskan": "pa scan",
+  "giveaway": "give way",
+  "na rening": "narinig",
+  "lisens": "license",
+  "scan sire": "scan CR",
+  "case there": "case done",
+  "keys done": "case done",
+  "capt your plate": "capture plate",
+  "color room": "colorum",
+  "expert na": "expired na",
+  "reclice": "reckless",
+  "pekke": "peke",
+  "pekip": "peke",
+  "u term": "u-turn",
+  "overtick": "overtake",
+  "open pack": "open pipe",
+  "de vective": "defective",
+  "rekut mo na": "i-record mo na",
+  "matula kang": "bat wala kang",
+  "batwala": "bat wala",
+  "bat": "bakit",
+  "nakachinelas": "naka tsinelas",
+  "ka ane na": "ka kanina",
+  "ka nina": "ka kanina",
+  "tinakbumoy ang": "tinakbo mo yung",
+  "pailure": "failure",
+  "tamatawid": "tumatawid",
+  "impowed": "impound",
+  "tas": "tapos"
+ },
+ "log": [
+  {
+   "test": "TEST_phone trial 2026-10-17 (owner voice, phone m4a)",
+   "skipped_on_purpose": [
+    "gina (extra noise word)",
+    "bawat (real word)",
+    "garbled whole lines"
+   ]
+  },
+  {
+   "test": "S07 driver phone recording (new female voice, 142-line driver sheet)",
+   "skipped_on_purpose": [
+    "body lang (real word)",
+    "dilo pa",
+    "garbled lines",
+    "number words"
+   ]
+  },
+  {
+   "test": "S08-S12 volunteer cuts 2026-10-18 (phone m4a/aac, 6 clips sets)",
+   "added": {
+    "hidi": "hindi",
+    "prankisa": "prangkisa",
+    "kohanan": "kuhanan",
+    "sa glit": "saglit",
+    "dag dag": "dagdag",
+    "dumahan": "dumaan",
+    "pasayero": "pasahero",
+    "mai kli": "maikli",
+    "icapture": "i capture",
+    "iscan": "i scan",
+    "baskan": "pa scan",
+    "giveaway": "give way",
+    "na rening": "narinig",
+    "lisens": "license"
+   },
+   "skipped_on_purpose": [
+    "bowl (real word)",
+    "sirap/sera (sirap is a real word)",
+    "palala (real word)",
+    "orcr -> or cr (matcher already handles)",
+    "po ang/pong, ka/ko (grammar, too risky)"
+   ],
+   "added_fallback": {
+    "scan sire": "scan CR",
+    "case there": "case done",
+    "keys done": "case done",
+    "capt your plate": "capture plate",
+    "color room": "colorum",
+    "expert na": "expired na",
+    "reclice": "reckless",
+    "pekke": "peke",
+    "pekip": "peke",
+    "u term": "u-turn",
+    "overtick": "overtake",
+    "open pack": "open pipe",
+    "de vective": "defective",
+    "rekut mo na": "i-record mo na"
+   }
+  },
+  {
+   "test": "LIVE TEST 1 2026-10-18 (owner voice, PC mic, run11b)",
+   "added": {
+    "matula kang": "bat wala kang",
+    "batwala": "bat wala",
+    "bat": "bakit",
+    "nakachinelas": "naka tsinelas",
+    "ka ane na": "ka kanina",
+    "ka nina": "ka kanina",
+    "tinakbumoy ang": "tinakbo mo yung",
+    "pailure": "failure",
+    "tamatawid": "tumatawid",
+    "impowed": "impound",
+    "tas": "tapos"
+   },
+   "owner_notes": [
+    "'bat' is short for 'bakit'",
+    "'tas' is short for 'tapos'",
+    "'to' is short for 'eto' (meaning only, not added)",
+    "'tinakbo' on the road = moving/speeding/beating/evading, depends on the situation",
+    "combined words (batwala) should be learned, not split by rule"
+   ]
+  }
+ ]
+}

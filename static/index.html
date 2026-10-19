@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FALLBACK CAMOTE</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="stage">
+  <div class="phone" id="phone">
+
+    <header class="top">
+      <button class="iconbtn" id="btnBack" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button class="iconbtn right" id="btnTools" aria-label="Test tools"><svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4.9a7.5 7.5 0 0 0-1.7-1L15 3.4h-4l-.4 2.5a7.5 7.5 0 0 0-1.7 1l-2.4-.9-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-.9a7.5 7.5 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.5 7.5 0 0 0 1.7-1l2.4.9 2-3.4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></button>
+      <h1 id="stepTitle">Violation Offense Tier</h1>
+      <p id="stepSub">Fill in the details to create a violation ticket</p>
+    </header>
+
+    <main class="sheet" id="sheet">
+
+      <section class="card livecard" id="liveCard">
+        <div class="video" id="videoBox">
+          <video id="cam" muted playsinline></video>
+          <div class="novideo" id="noVideo">Camera is off<br><small>Tap “Go live” to start the camera and microphone</small></div>
+          <div class="badges">
+            <span class="pill" id="pillState">Idle</span>
+            <span class="pill rec hidden" id="pillRec">● REC <b id="recTime">00:00</b></span>
+          </div>
+          <div class="meter" id="meter"><i id="meterBar"></i></div>
+        </div>
+        <div class="cmdrow" id="cmdRow"></div>
+        <div class="tagline" id="tagLine">Say “Hey Jarvis”, then a command. Everything you say after “record” is checked for violations.</div>
+        <button class="btn primary wide" id="btnLive">GO LIVE</button>
+      </section>
+
+      <section class="card ticket" id="ticketCard">
+        <button class="badge-doc" id="btnDoc" aria-label="Ticket"><svg viewBox="0 0 24 24"><path d="M8 4h8M9 2h6v4H9z M6 5H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-1 M8 12h8M8 16h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <div class="control">CONTROL NO.: <b id="ctrlNo">CL-0000000</b></div>
+        <ol class="stepper" id="stepper">
+          <li data-step="1"><span class="dot"><svg viewBox="0 0 24 24"><path d="M3 6h18v12H3z M8 11a2 2 0 1 0 0-.01 M5 16c.6-2 2-3 3-3s2.4 1 3 3 M14 10h5M14 14h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><em class="count hidden"></em></span><span class="lbl">Driver's<br>Information</span></li>
+          <li data-step="2"><span class="dot"><svg viewBox="0 0 24 24"><path d="M4 15l1.6-5.2A2 2 0 0 1 7.5 8.4h9a2 2 0 0 1 1.9 1.4L20 15v4h-2v-1.5H6V19H4z M7 15h.01 M17 15h.01" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><em class="count hidden"></em></span><span class="lbl">Vehicle<br>Information</span></li>
+          <li data-step="3"><span class="dot"><svg viewBox="0 0 24 24"><path d="M14 4l6 6-2 2-6-6z M11 7l-7 7 3 3 7-7 M4 21h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><em class="count hidden"></em></span><span class="lbl">Violation<br>Information</span></li>
+          <li data-step="4"><span class="dot"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z M14 3v5h5 M9 12h6M9 16h6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><em class="count hidden"></em></span><span class="lbl">Preview</span></li>
+        </ol>
+        <div id="stepBody"></div>
+        <div class="footer">
+          <button class="btn ghost" id="btnCancel">CANCEL TICKET</button>
+          <button class="btn primary" id="btnNext">NEXT</button>
+        </div>
+      </section>
+    </main>
+
+    <div class="toasts" id="toasts"></div>
+
+    <!-- Choose violation (like Frame 12) -->
+    <div class="modal hidden" id="chooseModal">
+      <div class="modalcard">
+        <div class="searchrow"><div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><input id="searchViol" placeholder="Search Violation" autocomplete="off"></div><button class="xbtn" id="closeChoose" aria-label="Close">✕</button></div>
+        <ul class="viollist" id="violList"></ul>
+      </div>
+    </div>
+
+    <!-- Test tools -->
+    <aside class="tools hidden" id="tools">
+      <div class="toolshead"><b>Test tools</b><button class="xbtn" id="closeTools" aria-label="Close">✕</button></div>
+      <div class="toolsbody" id="toolsBody"></div>
+    </aside>
+
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
