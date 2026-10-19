@@ -85,3 +85,6 @@ The capture page (this browser page, later the Pi) sends audio on `/ws`. A phone
 
 ## Case done
 When the case closes the camera is switched off and the system is idle again (microphone + "Hey Jarvis" only). The camera starts again at the next "Hey Jarvis" (or Start button). While a transcript is being made, **New ticket**, **Cancel ticket**, **Go live** and a spoken/pressed start are refused.
+
+## On the Raspberry Pi (no browser)
+`bash run_pi.sh` starts the server and `pi_capture.py` (headset microphone through `arecord`, beeps through `aplay`). Steps: CAMOTE\04_docs\PI_RUN_STEPS.md. Test without a Pi: `python pi_capture.py --wav some16k.wav` with the server running (CAPTURE_URL to change the address); `--list` shows the sound cards; `--beep-test` plays the three beeps. Packages: `requirements-pi.txt` (nothing new to install if the earlier model runs there).
